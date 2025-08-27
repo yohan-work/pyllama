@@ -9,7 +9,7 @@ Run:
      - Pull a model once:  ollama pull llama3
   4) python main.py
 """
-import os, glob, sys
+import os, glob, sys, shutil
 from typing import List
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
@@ -20,10 +20,11 @@ from langchain.chains import RetrievalQA
 
 DOC_DIR = os.environ.get("DOC_DIR", "docs")
 MODEL_NAME = os.environ.get("OLLAMA_MODEL", "llama3")  # e.g., llama3, qwen2, mistral
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "600"))
-CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "80"))
-TOP_K = int(os.environ.get("TOP_K", "5"))
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "200"))
+CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "50"))
+TOP_K = int(os.environ.get("TOP_K", "3"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
+SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.3"))  # 낮을수록 관련성 높음
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 def load_raw_texts(doc_dir: str) -> List[str]:
@@ -42,21 +43,35 @@ def load_raw_texts(doc_dir: str) -> List[str]:
     return texts
 
 def build_retriever(texts: List[str]):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+    
+    # 이전 Chroma DB 삭제 (새로운 설정으로 재구성)
+    chroma_dir = "./chroma_db"
+    if os.path.exists(chroma_dir):
+        shutil.rmtree(chroma_dir)
+    
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE, 
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+    )
     docs = []
     for t in texts:
-        docs.extend(splitter.create_documents([t]))
+        chunks = splitter.create_documents([t])
+        docs.extend(chunks)
+
+    print(f"[INFO] 총 {len(docs)}개 청크로 분할됨 (크기: {CHUNK_SIZE}, 겹침: {CHUNK_OVERLAP})")
 
     embed = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
-    vectordb = Chroma.from_documents(docs, embed)
-    retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": TOP_K})
+    vectordb = Chroma.from_documents(docs, embed, persist_directory=chroma_dir)
+    
+    # MMR(Maximal Marginal Relevance) 사용으로 다양성과 관련성 균형
+    retriever = vectordb.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": TOP_K, "fetch_k": TOP_K * 2, "lambda_mult": 0.8}
+    )
     return retriever
 
-PROMPT_TMPL = """당신은 도움이 되는 AI 어시스턴트입니다. 
-질문에 한국어로 자연스럽게 답변해 주세요.
-
-만약 아래 제공된 컨텍스트가 질문과 관련이 있다면 참고해서 답변하고, 
-관련이 없다면 컨텍스트를 무시하고 일반적인 지식으로 답변해 주세요.
+PROMPT_TMPL = """다음 컨텍스트를 참고해서 질문에 한국어로 답변해 주세요.
 
 컨텍스트:
 {context}
@@ -75,7 +90,44 @@ def build_chain(retriever):
         chain_type_kwargs={"prompt": prompt},
         return_source_documents=True,
     )
-    return qa
+    return qa, llm
+
+def is_relevant_to_docs(question: str, retriever, threshold: float = None):
+    """질문이 문서와 관련이 있는지 유사도 점수로 자동 판단"""
+    if threshold is None:
+        threshold = SIMILARITY_THRESHOLD
+        
+    try:
+        # 벡터 데이터베이스에서 유사도 점수와 함께 검색
+        vectordb = retriever.vectorstore
+        docs_and_scores = vectordb.similarity_search_with_score(question, k=TOP_K)
+        
+        if not docs_and_scores:
+            return False, []
+        
+        print(f"[DEBUG] 검색 결과 유사도 점수:")
+        for i, (doc, score) in enumerate(docs_and_scores):
+            print(f"  {i+1}. 점수: {score:.3f} | 내용: {doc.page_content[:50]}...")
+        
+        # 임계값보다 높은 유사도를 가진 문서만 선택
+        relevant_docs = []
+        for doc, score in docs_and_scores:
+            if score >= threshold:  # 점수가 높을수록 유사함 (Chroma는 거리 기반이므로 낮을수록 유사함)
+                relevant_docs.append(doc)
+        
+        # Chroma는 거리 기반 점수를 사용하므로 임계값 이하인 것들이 관련성이 높음
+        # 일반적으로 0.0-1.0 범위에서 낮을수록 유사함
+        if docs_and_scores[0][1] <= threshold:  # 가장 유사한 문서의 점수가 임계값 이하면 관련 있음
+            relevant_docs = [doc for doc, score in docs_and_scores if score <= threshold]
+            print(f"[INFO] {len(relevant_docs)}개의 관련 문서 발견 (임계값: {threshold})")
+            return True, relevant_docs
+        
+        print(f"[INFO] 관련 문서 없음 - 최고 유사도: {docs_and_scores[0][1]:.3f} > 임계값: {threshold}")
+        return False, []
+        
+    except Exception as e:
+        print(f"[WARN] 관련성 판단 중 오류: {e}")
+        return False, []
 
 def main():
     if not os.path.isdir(DOC_DIR):
@@ -89,7 +141,7 @@ def main():
         sys.exit(1)
 
     retriever = build_retriever(texts)
-    qa = build_chain(retriever)
+    qa, llm = build_chain(retriever)
     print("[OK] RAG 준비 완료. 아래에 질문을 입력하세요. (종료: 빈 줄 + Enter)")
 
     while True:
@@ -97,17 +149,39 @@ def main():
             q = input("\n질문> ").strip()
             if not q:
                 break
-            result = qa.invoke({"query": q})
-            print("\n--- 답변 ---")
-            print(result.get("result","(no result)"))
-            srcs = result.get("source_documents", [])
-            if srcs:
-                print("\n[근거 출처]")
-                for i, s in enumerate(srcs, 1):
-                    snippet = (s.page_content or "").strip().replace("\n"," ")
-                    if len(snippet) > 120:
-                        snippet = snippet[:120] + "…"
-                    print(f"{i}. {snippet}")
+            
+            # 질문이 문서와 관련이 있는지 확인
+            is_relevant, relevant_docs = is_relevant_to_docs(q, retriever)
+            
+            if is_relevant:
+                # RAG 사용 - 필터링된 관련 문서로만 답변 생성
+                if relevant_docs:
+                    # 관련 문서들을 컨텍스트로 조합
+                    context = "\n\n".join([doc.page_content for doc in relevant_docs])
+                    prompt = f"다음 컨텍스트를 참고해서 질문에 한국어로 답변해 주세요.\n\n컨텍스트:\n{context}\n\n질문: {q}\n\n답변:"
+                    
+                    # LLM으로 직접 답변 생성
+                    response = llm.invoke(prompt)
+                    print("\n--- 답변 (RAG) ---")
+                    print(response)
+                    
+                    print("\n[근거 출처]")
+                    for i, doc in enumerate(relevant_docs, 1):
+                        snippet = doc.page_content.strip().replace("\n"," ")
+                        if len(snippet) > 120:
+                            snippet = snippet[:120] + "…"
+                        print(f"{i}. {snippet}")
+                else:
+                    # 키워드는 있지만 관련 문서가 없는 경우
+                    response = llm.invoke(f"다음 질문에 한국어로 답변해주세요: {q}")
+                    print("\n--- 답변 (LLM) ---")
+                    print(response)
+            else:
+                # 순수 LLM 사용
+                response = llm.invoke(f"다음 질문에 한국어로 답변해주세요: {q}")
+                print("\n--- 답변 (LLM) ---")
+                print(response)
+                
         except (KeyboardInterrupt, EOFError):
             break
 
