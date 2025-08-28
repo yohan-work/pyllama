@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-슬랙 RAG 봇 - Ollama + Chroma 기반
-"""
-
 import os
 import re
 import time
@@ -26,7 +22,7 @@ load_dotenv()
 # 설정
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
-SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.8"))
+SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.4"))
 
 if not SLACK_BOT_TOKEN or not SLACK_APP_TOKEN:
     raise ValueError("SLACK_BOT_TOKEN과 SLACK_APP_TOKEN을 .env 파일에 설정해주세요!")
@@ -61,8 +57,8 @@ def initialize_rag_system():
         
         # 3. QA 체인 구축 
         qa_chain, llm = build_chain(retriever)
-        print("✅ QA 체인 구축 완료")
-        print("✅ LLM 연결 완료")
+        print(f"✅ QA 체인 구축 완료 (타입: {type(qa_chain)})")
+        print(f"✅ LLM 연결 완료 (타입: {type(llm)})")
         
         print("🎉 RAG 시스템 준비 완료!")
         return True
@@ -106,6 +102,7 @@ def process_user_question(question: str) -> Dict[str, Any]:
         if is_relevant:
             # 📚 RAG 답변
             print(f"[INFO] RAG 모드로 답변: {clean_question}")
+            print(f"[DEBUG] qa_chain 타입: {type(qa_chain)}")
             rag_start = time.time()
             result = qa_chain.invoke({"query": clean_question})
             rag_time = time.time() - rag_start
@@ -131,7 +128,12 @@ def process_user_question(question: str) -> Dict[str, Any]:
             # 🤖 순수 LLM 답변
             print(f"[INFO] LLM 모드로 답변: {clean_question}")
             llm_start = time.time()
-            korean_prompt = f"다음 질문에 한국어로 답변해주세요: {clean_question}"
+            korean_prompt = f"""당신은 한국어로만 답변하는 AI 어시스턴트입니다. 
+반드시 한국어로만 답변하세요. 영어는 절대 사용하지 마세요.
+
+질문: {clean_question}
+
+한국어 답변:"""
             answer = llm.invoke(korean_prompt)
             llm_time = time.time() - llm_start
             print(f"[TIMING] LLM 생성: {llm_time:.2f}초")

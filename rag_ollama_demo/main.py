@@ -24,7 +24,7 @@ CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "200"))
 CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "50"))
 TOP_K = int(os.environ.get("TOP_K", "3"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
-SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.8"))  # 더 엄격한 임계값 (0.8 이하만 관련 있다고 판단)  # Chroma cosine distance: 낮을수록 유사
+SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.4"))  # 매우 엄격한 임계값 (0.4 이하만 관련 있다고 판단)  # Chroma cosine distance: 낮을수록 유사
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 def load_raw_texts(doc_dir: str) -> List[str]:
@@ -71,14 +71,15 @@ def build_retriever(texts: List[str]):
     )
     return retriever
 
-PROMPT_TMPL = """다음 컨텍스트를 참고해서 질문에 한국어로 답변해 주세요.
+PROMPT_TMPL = """당신은 한국어로만 답변하는 AI 어시스턴트입니다.
+다음 컨텍스트를 참고해서 질문에 반드시 한국어로만 답변해 주세요. 영어는 절대 사용하지 마세요.
 
 컨텍스트:
 {context}
 
 질문: {question}
 
-답변:"""
+한국어 답변:"""
 
 def build_chain(retriever):
     prompt = PromptTemplate(template=PROMPT_TMPL, input_variables=["context","question"])
@@ -105,20 +106,27 @@ def is_relevant_to_docs(question: str, retriever, threshold: float = None):
         if not docs_and_scores:
             return False, []
         
-        print(f"[DEBUG] 검색 결과 유사도 점수:")
+        print(f"[DEBUG] 질문: '{question}' | 검색 결과 유사도 점수:")
         for i, (doc, score) in enumerate(docs_and_scores):
             print(f"  {i+1}. 점수: {score:.3f} | 내용: {doc.page_content[:50]}...")
+        print(f"[DEBUG] 임계값: {threshold}, 절대기준: 0.6")
         
         # Chroma cosine distance: 0(완전 유사) ~ 2(완전 다름)
-        # 1. 가장 유사한 문서의 점수가 임계값보다 낮아야 함
-        # 2. 상위 문서들의 평균 점수도 고려
+        # 1. 절대적 안전 장치: 최고 점수가 0.6 이상이면 무조건 관련없음
+        # 2. 가장 유사한 문서의 점수가 임계값보다 낮아야 함
+        # 3. 상위 문서들의 평균 점수도 고려
         best_score = docs_and_scores[0][1]
         avg_score = sum(score for _, score in docs_and_scores[:3]) / min(3, len(docs_and_scores))
         
-        if best_score <= threshold and avg_score <= threshold + 0.3:  # 최고 점수와 평균 점수 모두 고려
+        # 절대적 안전 장치: 최고 점수가 0.6 이상이면 무조건 관련없음
+        if best_score >= 0.6:
+            print(f"[INFO] 절대적 기준으로 관련성 없음 - 최고 점수: {best_score:.3f} >= 0.6")
+            return False, []
+        
+        if best_score <= threshold and avg_score <= threshold + 0.1:  # 더 엄격한 기준 적용
             # 임계값을 넘는 문서는 제외
             relevant_docs = [doc for doc, score in docs_and_scores if score <= threshold]
-            if relevant_docs:  # 최소 1개 이상의 관련 문서가 있어야 함
+            if len(relevant_docs) >= 1:  # 최소 1개 이상의 관련 문서가 있어야 함
                 print(f"[INFO] {len(relevant_docs)}개의 관련 문서 발견 (최고 점수: {best_score:.3f}, 평균: {avg_score:.3f}, 임계값: {threshold})")
                 return True, relevant_docs
             
