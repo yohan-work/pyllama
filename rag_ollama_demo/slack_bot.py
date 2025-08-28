@@ -5,6 +5,7 @@
 
 import os
 import re
+import time
 from typing import List, Dict, Any
 import asyncio
 from dotenv import load_dotenv
@@ -59,11 +60,8 @@ def initialize_rag_system():
         print("✅ 문서 인덱싱 완료")
         
         # 3. QA 체인 구축 
-        qa_chain = build_chain(retriever)
+        qa_chain, llm = build_chain(retriever)
         print("✅ QA 체인 구축 완료")
-        
-        # 4. 순수 LLM 준비
-        llm = Ollama(model="llama3", temperature=0.7)
         print("✅ LLM 연결 완료")
         
         print("🎉 RAG 시스템 준비 완료!")
@@ -85,6 +83,8 @@ def clean_text(text: str) -> str:
 
 def process_user_question(question: str) -> Dict[str, Any]:
     """사용자 질문 처리"""
+    start_time = time.time()
+    
     try:
         # 텍스트 정리
         clean_question = clean_text(question)
@@ -93,16 +93,23 @@ def process_user_question(question: str) -> Dict[str, Any]:
             return {
                 "answer": "질문을 명확히 입력해주세요! 🤔",
                 "is_rag": False,
-                "sources": []
+                "sources": [],
+                "response_time": time.time() - start_time
             }
         
-        # 관련성 판단
+        # 관련성 판단 시작 시간
+        relevance_start = time.time()
         is_relevant, relevant_docs = is_relevant_to_docs(clean_question, retriever, SIMILARITY_THRESHOLD)
+        relevance_time = time.time() - relevance_start
+        print(f"[TIMING] 관련성 판단: {relevance_time:.2f}초")
         
         if is_relevant:
             # 📚 RAG 답변
             print(f"[INFO] RAG 모드로 답변: {clean_question}")
+            rag_start = time.time()
             result = qa_chain.invoke({"query": clean_question})
+            rag_time = time.time() - rag_start
+            print(f"[TIMING] RAG 생성: {rag_time:.2f}초")
             
             # 소스 문서 정보 추출
             sources = []
@@ -111,29 +118,42 @@ def process_user_question(question: str) -> Dict[str, Any]:
                     content_preview = doc.page_content[:100].replace('\n', ' ')
                     sources.append(f"{i}. {content_preview}...")
             
+            total_time = time.time() - start_time
+            print(f"[TIMING] 전체 RAG 응답: {total_time:.2f}초")
+            
             return {
                 "answer": result["result"],
                 "is_rag": True,
-                "sources": sources
+                "sources": sources,
+                "response_time": total_time
             }
         else:
             # 🤖 순수 LLM 답변
             print(f"[INFO] LLM 모드로 답변: {clean_question}")
+            llm_start = time.time()
             korean_prompt = f"다음 질문에 한국어로 답변해주세요: {clean_question}"
             answer = llm.invoke(korean_prompt)
+            llm_time = time.time() - llm_start
+            print(f"[TIMING] LLM 생성: {llm_time:.2f}초")
+            
+            total_time = time.time() - start_time
+            print(f"[TIMING] 전체 LLM 응답: {total_time:.2f}초")
             
             return {
                 "answer": answer,
                 "is_rag": False,
-                "sources": []
+                "sources": [],
+                "response_time": total_time
             }
             
     except Exception as e:
-        print(f"[ERROR] 질문 처리 중 오류: {e}")
+        total_time = time.time() - start_time
+        print(f"[ERROR] 질문 처리 중 오류 ({total_time:.2f}초): {e}")
         return {
             "answer": f"죄송합니다. 처리 중 오류가 발생했습니다: {str(e)} 😅",
             "is_rag": False,
-            "sources": []
+            "sources": [],
+            "response_time": total_time
         }
 
 def format_slack_response(result: Dict[str, Any]) -> str:
@@ -141,19 +161,20 @@ def format_slack_response(result: Dict[str, Any]) -> str:
     answer = result["answer"]
     is_rag = result["is_rag"]
     sources = result["sources"]
+    response_time = result.get("response_time", 0)
     
     # 기본 답변
     response = f"{answer}\n\n"
     
-    # 답변 타입 표시
+    # 답변 타입 및 응답 시간 표시
     if is_rag:
-        response += "📚 *학습된 문서 기반 답변*\n"
+        response += f"📚 *학습된 문서 기반 답변* (⏱️ {response_time:.2f}초)\n"
         if sources:
             response += "*근거 출처:*\n"
             for source in sources:
                 response += f"• {source}\n"
     else:
-        response += "🤖 *일반 지식 기반 답변*"
+        response += f"🤖 *일반 지식 기반 답변* (⏱️ {response_time:.2f}초)"
     
     return response
 
