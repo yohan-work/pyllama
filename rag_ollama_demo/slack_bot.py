@@ -206,17 +206,20 @@ def process_slack_message(client: SocketModeClient, req: SocketModeRequest):
         channel_id = event.get("channel")
         user_id = event.get("user")
         text = event.get("text", "")
+        message_ts = event.get("ts")  # 원래 메시지의 timestamp (답글용)
         
         if not text:
             return
             
         print(f"[INFO] 메시지 수신: {text}")
+        print(f"[DEBUG] 원본 메시지 TS: {message_ts}")
         
-        # 로딩 메시지 표시
+        # 로딩 메시지 표시 (답글로)
         try:
             loading_response = web_client.chat_postMessage(
                 channel=channel_id,
-                text="🤔 생각 중... 잠시만 기다려주세요!"
+                text="🤔 생각 중... 잠시만 기다려주세요!",
+                thread_ts=message_ts
             )
             loading_ts = loading_response["ts"]
         except Exception as e:
@@ -237,17 +240,19 @@ def process_slack_message(client: SocketModeClient, req: SocketModeRequest):
                     text=formatted_response
                 )
             else:
-                # 새 메시지로 답변
+                # 새 메시지로 답변 (답글로)
                 web_client.chat_postMessage(
                     channel=channel_id,
-                    text=formatted_response
+                    text=formatted_response,
+                    thread_ts=message_ts
                 )
         except Exception as e:
             print(f"[ERROR] 답변 전송 실패: {e}")
-            # 백업 답변
+            # 백업 답변 (답글로)
             web_client.chat_postMessage(
                 channel=channel_id,
-                text="죄송합니다. 답변 전송 중 오류가 발생했습니다. 😅"
+                text="죄송합니다. 답변 전송 중 오류가 발생했습니다. 😅",
+                thread_ts=message_ts
             )
 
 def main():
