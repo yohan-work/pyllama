@@ -24,7 +24,7 @@ CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "200"))
 CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "50"))
 TOP_K = int(os.environ.get("TOP_K", "3"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
-SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.3"))  # 낮을수록 관련성 높음
+SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.8"))  # 더 엄격한 임계값 (0.8 이하만 관련 있다고 판단)  # Chroma cosine distance: 낮을수록 유사
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 def load_raw_texts(doc_dir: str) -> List[str]:
@@ -109,18 +109,21 @@ def is_relevant_to_docs(question: str, retriever, threshold: float = None):
         for i, (doc, score) in enumerate(docs_and_scores):
             print(f"  {i+1}. 점수: {score:.3f} | 내용: {doc.page_content[:50]}...")
         
-        # 임계값보다 높은 유사도를 가진 문서만 선택
-        relevant_docs = []
-        for doc, score in docs_and_scores:
-            if score >= threshold:  # 점수가 높을수록 유사함 (Chroma는 거리 기반이므로 낮을수록 유사함)
-                relevant_docs.append(doc)
+        # Chroma cosine distance: 0(완전 유사) ~ 2(완전 다름)
+        # 1. 가장 유사한 문서의 점수가 임계값보다 낮아야 함
+        # 2. 상위 문서들의 평균 점수도 고려
+        best_score = docs_and_scores[0][1]
+        avg_score = sum(score for _, score in docs_and_scores[:3]) / min(3, len(docs_and_scores))
         
-        # Chroma는 거리 기반 점수를 사용하므로 임계값 이하인 것들이 관련성이 높음
-        # 일반적으로 0.0-1.0 범위에서 낮을수록 유사함
-        if docs_and_scores[0][1] <= threshold:  # 가장 유사한 문서의 점수가 임계값 이하면 관련 있음
+        if best_score <= threshold and avg_score <= threshold + 0.3:  # 최고 점수와 평균 점수 모두 고려
+            # 임계값을 넘는 문서는 제외
             relevant_docs = [doc for doc, score in docs_and_scores if score <= threshold]
-            print(f"[INFO] {len(relevant_docs)}개의 관련 문서 발견 (임계값: {threshold})")
-            return True, relevant_docs
+            if relevant_docs:  # 최소 1개 이상의 관련 문서가 있어야 함
+                print(f"[INFO] {len(relevant_docs)}개의 관련 문서 발견 (최고 점수: {best_score:.3f}, 평균: {avg_score:.3f}, 임계값: {threshold})")
+                return True, relevant_docs
+            
+        print(f"[INFO] 관련성 낮음 - 최고: {best_score:.3f}, 평균: {avg_score:.3f} > 임계값: {threshold}")
+        return False, []
         
         print(f"[INFO] 관련 문서 없음 - 최고 유사도: {docs_and_scores[0][1]:.3f} > 임계값: {threshold}")
         return False, []
