@@ -11,7 +11,8 @@ Run:
 """
 import os, glob, sys, shutil
 from typing import List
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+from langchain.schema import Document
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import Ollama
@@ -20,11 +21,11 @@ from langchain.chains import RetrievalQA
 
 DOC_DIR = os.environ.get("DOC_DIR", "docs")
 MODEL_NAME = os.environ.get("OLLAMA_MODEL", "llama3")  # e.g., llama3, qwen2, mistral
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "300"))
-CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "100"))
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "500"))
+CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "75"))
 TOP_K = int(os.environ.get("TOP_K", "5"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
-SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.4"))  # 매우 엄격한 임계값 (0.4 이하만 관련 있다고 판단)  # Chroma cosine distance: 낮을수록 유사
+SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "10.0"))  # 관대한 임계값 (10.0 이하만 관련 있다고 판단)  # Chroma cosine distance: 낮을수록 유사
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 
 def load_raw_texts(doc_dir: str) -> List[str]:
@@ -92,6 +93,64 @@ def load_raw_texts(doc_dir: str) -> List[str]:
     print(f"[INFO] 총 {len(texts)}개 파일 로드 완료")
     return texts
 
+def smart_text_splitting(text: str, filename: str) -> List[Document]:
+    """파일 타입에 따라 적절한 방법으로 텍스트 분할"""
+    docs = []
+    
+    # 파일명에서 확장자 추출
+    is_markdown = filename.lower().endswith('.md')
+    
+    if is_markdown:
+        # 마크다운 파일: 헤더 기반 분할
+        print(f"[INFO] 마크다운 헤더 기반 분할 적용: {filename}")
+        
+        # 마크다운 헤더 분할기 설정
+        headers_to_split_on = [
+            ("#", "Header 1"),
+            ("##", "Header 2"), 
+            ("###", "Header 3"),
+            ("####", "Header 4"),
+        ]
+        
+        markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
+        md_header_splits = markdown_splitter.split_text(text)
+        
+        # 각 헤더 섹션을 추가로 크기 기반으로 분할 (너무 큰 경우)
+        for doc in md_header_splits:
+            if len(doc.page_content) > CHUNK_SIZE * 2:  # 큰 섹션은 추가 분할
+                sub_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=CHUNK_SIZE,
+                    chunk_overlap=CHUNK_OVERLAP,
+                    separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+                )
+                sub_docs = sub_splitter.create_documents([doc.page_content])
+                for sub_doc in sub_docs:
+                    # 원래 헤더 메타데이터 유지
+                    sub_doc.metadata.update(doc.metadata)
+                    sub_doc.metadata['filename'] = filename
+                    docs.append(sub_doc)
+            else:
+                doc.metadata['filename'] = filename
+                docs.append(doc)
+    
+    else:
+        # 일반 텍스트: 문단 우선 분할
+        print(f"[INFO] 문단 기반 분할 적용: {filename}")
+        
+        # 문단 기반 분할기 (문단을 우선적으로 유지)
+        paragraph_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP,
+            separators=["\n\n", "\n", ". ", "! ", "? ", ", ", " ", ""]  # 문단(\n\n) 최우선
+        )
+        
+        para_docs = paragraph_splitter.create_documents([text])
+        for doc in para_docs:
+            doc.metadata['filename'] = filename
+            docs.append(doc)
+    
+    return docs
+
 def build_retriever(texts: List[str]):
     
     # 이전 Chroma DB 삭제 (새로운 설정으로 재구성)
@@ -99,17 +158,28 @@ def build_retriever(texts: List[str]):
     if os.path.exists(chroma_dir):
         shutil.rmtree(chroma_dir)
     
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, 
-        chunk_overlap=CHUNK_OVERLAP,
-        separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
-    )
     docs = []
-    for t in texts:
-        chunks = splitter.create_documents([t])
-        docs.extend(chunks)
+    for text in texts:
+        # 파일명 추출 (파일명: {filename}\n내용:\n{content} 형태)
+        lines = text.split('\n', 2)
+        if len(lines) >= 3 and lines[0].startswith('파일명: '):
+            filename = lines[0].replace('파일명: ', '')
+            content = lines[2] if len(lines) > 2 else ''
+        else:
+            filename = "unknown.txt"
+            content = text
+        
+        # 스마트 분할 적용
+        file_docs = smart_text_splitting(content, filename)
+        docs.extend(file_docs)
 
-    print(f"[INFO] 총 {len(docs)}개 청크로 분할됨 (크기: {CHUNK_SIZE}, 겹침: {CHUNK_OVERLAP})")
+    print(f"[INFO] 총 {len(docs)}개 청크로 분할됨 (스마트 분할 적용)")
+    
+    # 분할 결과 상세 출력
+    markdown_count = sum(1 for doc in docs if doc.metadata.get('filename', '').endswith('.md'))
+    text_count = len(docs) - markdown_count
+    print(f"[INFO] - 마크다운 청크: {markdown_count}개")
+    print(f"[INFO] - 일반 텍스트 청크: {text_count}개")
 
     embed = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
     vectordb = Chroma.from_documents(docs, embed, persist_directory=chroma_dir)
@@ -168,14 +238,14 @@ def is_relevant_to_docs(question: str, retriever, threshold: float = None):
         best_score = docs_and_scores[0][1]
         avg_score = sum(score for _, score in docs_and_scores[:3]) / min(3, len(docs_and_scores))
         
-        # 절대적 안전 장치: 최고 점수가 1.8 이상이면 무조건 관련없음 (더 관대하게)
-        if best_score >= 1.8:
-            print(f"[INFO] 절대적 기준으로 관련성 없음 - 최고 점수: {best_score:.3f} >= 1.8")
+        # 절대적 안전 장치: 최고 점수가 15.0 이상이면 무조건 관련없음 (매우 관대하게)
+        if best_score >= 15.0:
+            print(f"[INFO] 절대적 기준으로 관련성 없음 - 최고 점수: {best_score:.3f} >= 15.0")
             return False, []
         
-        if best_score <= threshold and avg_score <= threshold + 0.3:  # 더 관대한 기준 적용
-            # 임계값을 넘는 문서는 제외
-            relevant_docs = [doc for doc, score in docs_and_scores if score <= threshold]
+        if best_score <= threshold or avg_score <= threshold + 2.0:  # 훨씬 관대한 기준 적용
+            # 임계값을 넘는 문서는 제외하되, 더 관대하게 판단
+            relevant_docs = [doc for doc, score in docs_and_scores if score <= threshold + 5.0]  # 관대한 마진 적용
             if len(relevant_docs) >= 1:  # 최소 1개 이상의 관련 문서가 있어야 함
                 print(f"[INFO] {len(relevant_docs)}개의 관련 문서 발견 (최고 점수: {best_score:.3f}, 평균: {avg_score:.3f}, 임계값: {threshold})")
                 return True, relevant_docs
