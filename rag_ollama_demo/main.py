@@ -20,12 +20,12 @@ from langchain.chains import RetrievalQA
 
 DOC_DIR = os.environ.get("DOC_DIR", "docs")
 MODEL_NAME = os.environ.get("OLLAMA_MODEL", "llama3")  # e.g., llama3, qwen2, mistral
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "200"))
-CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "50"))
-TOP_K = int(os.environ.get("TOP_K", "3"))
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "300"))
+CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "100"))
+TOP_K = int(os.environ.get("TOP_K", "5"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
 SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.4"))  # 매우 엄격한 임계값 (0.4 이하만 관련 있다고 판단)  # Chroma cosine distance: 낮을수록 유사
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 
 def load_raw_texts(doc_dir: str) -> List[str]:
     texts = []
@@ -168,12 +168,12 @@ def is_relevant_to_docs(question: str, retriever, threshold: float = None):
         best_score = docs_and_scores[0][1]
         avg_score = sum(score for _, score in docs_and_scores[:3]) / min(3, len(docs_and_scores))
         
-        # 절대적 안전 장치: 최고 점수가 0.6 이상이면 무조건 관련없음
-        if best_score >= 0.6:
-            print(f"[INFO] 절대적 기준으로 관련성 없음 - 최고 점수: {best_score:.3f} >= 0.6")
+        # 절대적 안전 장치: 최고 점수가 1.8 이상이면 무조건 관련없음 (더 관대하게)
+        if best_score >= 1.8:
+            print(f"[INFO] 절대적 기준으로 관련성 없음 - 최고 점수: {best_score:.3f} >= 1.8")
             return False, []
         
-        if best_score <= threshold and avg_score <= threshold + 0.1:  # 더 엄격한 기준 적용
+        if best_score <= threshold and avg_score <= threshold + 0.3:  # 더 관대한 기준 적용
             # 임계값을 넘는 문서는 제외
             relevant_docs = [doc for doc, score in docs_and_scores if score <= threshold]
             if len(relevant_docs) >= 1:  # 최소 1개 이상의 관련 문서가 있어야 함
