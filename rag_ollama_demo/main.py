@@ -30,16 +30,66 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6
 def load_raw_texts(doc_dir: str) -> List[str]:
     texts = []
     for path in sorted(glob.glob(os.path.join(doc_dir, "**", "*.*"), recursive=True)):
+        filename = os.path.basename(path)
+        print(f"[INFO] 처리 중: {filename}")
+        
         if path.lower().endswith((".txt", ".md")):
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                texts.append(f.read())
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                    texts.append(f"파일명: {filename}\n내용:\n{content}")
+            except Exception as e:
+                print(f"[WARN] 텍스트 파일 읽기 실패: {path} ({e})")
+                
         elif path.lower().endswith(".pdf"):
             try:
                 from pypdf import PdfReader
                 reader = PdfReader(path)
-                texts.append("\n".join([p.extract_text() or "" for p in reader.pages]))
+                content = "\n".join([p.extract_text() or "" for p in reader.pages])
+                texts.append(f"파일명: {filename}\n내용:\n{content}")
             except Exception as e:
                 print(f"[WARN] PDF 읽기 실패: {path} ({e})")
+                
+        elif path.lower().endswith(".docx"):
+            try:
+                from docx import Document
+                doc = Document(path)
+                content = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+                texts.append(f"파일명: {filename}\n내용:\n{content}")
+            except Exception as e:
+                print(f"[WARN] Word 문서 읽기 실패: {path} ({e})")
+                
+        elif path.lower().endswith((".xlsx", ".xls")):
+            try:
+                import pandas as pd
+                # 모든 시트 읽기
+                excel_file = pd.ExcelFile(path)
+                content_parts = []
+                for sheet_name in excel_file.sheet_names:
+                    df = pd.read_excel(path, sheet_name=sheet_name)
+                    content_parts.append(f"시트: {sheet_name}\n{df.to_string()}")
+                content = "\n\n".join(content_parts)
+                texts.append(f"파일명: {filename}\n내용:\n{content}")
+            except Exception as e:
+                print(f"[WARN] Excel 파일 읽기 실패: {path} ({e})")
+                
+        elif path.lower().endswith(".pptx"):
+            try:
+                from pptx import Presentation
+                prs = Presentation(path)
+                content_parts = []
+                for i, slide in enumerate(prs.slides, 1):
+                    slide_text = []
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text"):
+                            slide_text.append(shape.text)
+                    content_parts.append(f"슬라이드 {i}: {' '.join(slide_text)}")
+                content = "\n\n".join(content_parts)
+                texts.append(f"파일명: {filename}\n내용:\n{content}")
+            except Exception as e:
+                print(f"[WARN] PowerPoint 파일 읽기 실패: {path} ({e})")
+                
+    print(f"[INFO] 총 {len(texts)}개 파일 로드 완료")
     return texts
 
 def build_retriever(texts: List[str]):
